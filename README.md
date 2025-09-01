@@ -42,7 +42,9 @@ The file structure is listed as follows:
 
 11. CAT: A Causally Graph Attention Network for Trimming Heterophilic Graph published in Information Science.
     
-12. Causal invariant geographic network representations with feature and structural distribution shifts. 
+12. Causal invariant geographic network representations with feature and structural distribution shifts.
+
+13. STDCformer: A transformer-based model with a spatial-temporal causal de-confounding strategy for crowd flow prediction
 
 13 Baseline includes methods such as (1) History Average model (HA) (2) Autoregressive Integrated Moving Average model (ARIMA) (3) Support Vector Regression model (SVR) (4) Graph Convolutional Network model (GCN) (5) Gated Recurrent Unit model (GRU)
 
