@@ -20,6 +20,9 @@ def main():
     parser.add_argument('--test_samples', type=int, default=1000)
     parser.add_argument('--n_points', type=int, default=5001)
     parser.add_argument('--delay_topic', default='/lbl_1')
+    parser.add_argument('--z_source', choices=['fix', 'barometer', 'gt'], default='fix',
+                        help='Source of z channel for EKF 3D: /fix.altitude, /barometer_node/depth, or colmap gt z.')
+    parser.add_argument('--baro_depth_topic', default='/barometer_node/depth')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -34,13 +37,16 @@ def main():
     # -------------------------
     # 1) Read rosbag topics
     # -------------------------
-    fix_t, fix_x, fix_y = [], [], []
+    fix_t, fix_x, fix_y, fix_z = [], [], [], []
     imu_t, imu_a = [], []
+    baro_t, baro_depth = [], []
     lbl_t, lbl_delay = [], []
 
     with AnyReader([bag]) as reader:
         conns = {c.topic: c for c in reader.connections}
         required = ['/fix', '/rtimulib_node/imu', args.delay_topic]
+        if args.z_source == 'barometer':
+            required.append(args.baro_depth_topic)
         miss = [t for t in required if t not in conns]
         if miss:
             raise ValueError(f'Missing topics in bag: {miss}')
@@ -48,6 +54,7 @@ def main():
         c_fix = conns['/fix']
         c_imu = conns['/rtimulib_node/imu']
         c_lbl = conns[args.delay_topic]
+        c_baro = conns[args.baro_depth_topic] if args.z_source == 'barometer' else None
 
         t0_ns = None
         # choose /fix start as global reference start (same as lbl in this bag)
@@ -64,6 +71,7 @@ def main():
             # In this dataset /fix appears in NED-style frame values
             fix_x.append(float(msg.latitude))
             fix_y.append(float(msg.longitude))
+            fix_z.append(float(msg.altitude))
 
         for c, t, raw in reader.messages(connections=[c_imu]):
             msg = reader.deserialize(raw, c.msgtype)
@@ -80,11 +88,22 @@ def main():
             lbl_t.append(tt)
             lbl_delay.append(float(msg.arrival_time))
 
+        if c_baro is not None:
+            for c, t, raw in reader.messages(connections=[c_baro]):
+                msg = reader.deserialize(raw, c.msgtype)
+                tt = (t - t0_ns) / 1e9
+                baro_t.append(tt)
+                # In this dataset this topic stores depth-like scalar in fluid_pressure.
+                baro_depth.append(float(msg.fluid_pressure))
+
     fix_t = np.asarray(fix_t)
     fix_x = np.asarray(fix_x)
     fix_y = np.asarray(fix_y)
+    fix_z = np.asarray(fix_z)
     imu_t = np.asarray(imu_t)
     imu_a = np.asarray(imu_a)
+    baro_t = np.asarray(baro_t)
+    baro_depth = np.asarray(baro_depth)
     lbl_t = np.asarray(lbl_t)
     lbl_delay = np.asarray(lbl_delay)
 
@@ -96,6 +115,7 @@ def main():
     t_gt = gt[:, 0] / 20.0
     x_gt = gt[:, 1]
     y_gt = gt[:, 2]
+    z_gt = gt[:, 3]
 
     # -------------------------
     # 3) Build common timeline with 5001 points
@@ -108,7 +128,7 @@ def main():
     t = np.linspace(t_start, t_end, args.n_points)
 
     # -------------------------
-    # 4) Build features x,y,v,a,theta,delay
+    # 4) Build features x,y,v,a,theta,delay and z-channel for EKF 3D
     # -------------------------
     x_nav = interp_linear(fix_t, fix_x, t)
     y_nav = interp_linear(fix_t, fix_y, t)
@@ -121,6 +141,15 @@ def main():
     theta = wrap_to_pi(theta)
 
     a = interp_linear(imu_t, imu_a, t)
+
+    if args.z_source == 'fix':
+        z_series = interp_linear(fix_t, fix_z, t)
+    elif args.z_source == 'barometer':
+        if len(baro_t) == 0:
+            raise ValueError('Requested barometer z_source but no barometer data found.')
+        z_series = interp_linear(baro_t, baro_depth, t)
+    else:  # gt
+        z_series = interp_linear(t_gt, z_gt, t)
 
     # delay and mask: keep only moments where LBL actually reports (nearest grid bin), others 0
     delay = np.zeros_like(t, dtype=np.float64)
@@ -149,6 +178,7 @@ def main():
     X = X_full[:-1]
     Y = Y_full[1:]
     M = mask[:-1]
+    Z = z_series[:-1]
 
     needed = args.train_samples + args.test_samples
     if X.shape[0] < needed:
@@ -157,10 +187,12 @@ def main():
     X_train = X[:args.train_samples]
     Y_train = Y[:args.train_samples]
     M_train = M[:args.train_samples]
+    Z_train = Z[:args.train_samples]
 
     X_test = X[args.train_samples:args.train_samples + args.test_samples]
     Y_test = Y[args.train_samples:args.train_samples + args.test_samples]
     M_test = M[args.train_samples:args.train_samples + args.test_samples]
+    Z_test = Z[args.train_samples:args.train_samples + args.test_samples]
 
     # -------------------------
     # 6) Normalize using train stats
@@ -188,6 +220,8 @@ def main():
         X_test=X_test_n.astype(np.float32),
         Y_test=Y_test.astype(np.float32),
         M_test=M_test.astype(np.int64),
+        Z_train=Z_train.astype(np.float32),
+        Z_test=Z_test.astype(np.float32),
         feat_mean=feat_mean.astype(np.float32),
         feat_std=feat_std.astype(np.float32),
         t_train=t[:args.train_samples].astype(np.float32),
@@ -195,6 +229,7 @@ def main():
         source_bag=str(bag),
         source_gt=str(gt_path),
         delay_topic=args.delay_topic,
+        z_source=args.z_source,
         common_t_start=np.float32(t_start),
         common_t_end=np.float32(t_end),
     )
@@ -204,6 +239,7 @@ def main():
     print(f'Train: X={X_train_n.shape}, Y={Y_train.shape}, M={M_train.shape}')
     print(f'Test : X={X_test_n.shape}, Y={Y_test.shape}, M={M_test.shape}')
     print(f'Delay valid ratio train: {M_train.mean():.4f}, test: {M_test.mean():.4f}')
+    print(f'Z source: {args.z_source}, train z range [{Z_train.min():.3f}, {Z_train.max():.3f}]')
 
 
 if __name__ == '__main__':
