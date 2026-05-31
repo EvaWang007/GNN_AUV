@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
+import matplotlib.pyplot as plt
 
 
 def build_full_edge_index(num_nodes: int = 6):
@@ -77,6 +78,8 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--model_out", default="/home/evawang/T-GCN/data/auv_gcn6_delay_model.pt")
+    parser.add_argument("--history_out", default="/home/evawang/T-GCN/data/auv_gcn6_delay_history.csv")
+    parser.add_argument("--curve_out", default="/home/evawang/T-GCN/data/auv_gcn6_delay_loss_curve.png")
     args = parser.parse_args()
 
     d = np.load(args.data_npz, allow_pickle=True)
@@ -92,6 +95,7 @@ def main():
 
     best_rmse = float("inf")
     best_state = None
+    history = []
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -121,6 +125,7 @@ def main():
                 f"train_mse={train_mse:.6f} train_rmse={train_rmse:.6f} | "
                 f"test_mse={test_mse:.6f} test_rmse={test_rmse:.6f} test_mae={test_mae:.6f}"
             )
+            history.append([epoch, train_mse, train_rmse, test_mse, test_rmse, test_mae])
             if test_rmse < best_rmse:
                 best_rmse = test_rmse
                 best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
@@ -139,6 +144,34 @@ def main():
         )
         print(f"Saved best model to: {out}")
         print(f"Best test RMSE: {best_rmse:.6f}")
+
+    if history:
+        hist = np.asarray(history, dtype=np.float64)
+        hist_path = Path(args.history_out)
+        hist_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savetxt(
+            hist_path,
+            hist,
+            delimiter=",",
+            header="epoch,train_mse,train_rmse,test_mse,test_rmse,test_mae",
+            comments="",
+        )
+        print(f"Saved history csv to: {hist_path}")
+
+        plt.figure(figsize=(8, 4))
+        plt.plot(hist[:, 0], hist[:, 2], label="train_rmse")
+        plt.plot(hist[:, 0], hist[:, 4], label="test_rmse")
+        plt.xlabel("Epoch")
+        plt.ylabel("RMSE (m)")
+        plt.title("GNN Training Curve (RMSE vs Epoch)")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        curve_path = Path(args.curve_out)
+        curve_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(curve_path, dpi=170)
+        plt.close()
+        print(f"Saved loss curve to: {curve_path}")
 
 
 if __name__ == "__main__":

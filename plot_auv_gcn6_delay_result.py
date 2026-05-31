@@ -3,6 +3,7 @@ import torch
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
+import argparse
 
 
 def build_full_edge_index(num_nodes: int = 6):
@@ -43,9 +44,21 @@ class SixNodeGCNRegressor(torch.nn.Module):
 
 
 def main():
-    npz_path = "/home/evawang/T-GCN/data/auv6d_delay_20210428_train4000_test1000.npz"
-    model_path = "/home/evawang/T-GCN/data/auv_gcn6_delay_model.pt"
-    out_dir = "/home/evawang/T-GCN/data"
+    parser = argparse.ArgumentParser(description="Plot GCN6+delay trajectory/results")
+    parser.add_argument(
+        "--data_npz",
+        default="/home/evawang/T-GCN/data/lbl_aqualoc_seq6_6tuple_train4000_test1000.npz",
+    )
+    parser.add_argument(
+        "--model_path",
+        default="/home/evawang/T-GCN/data/auv_gcn6_delay_seq6_model.pt",
+    )
+    parser.add_argument("--out_dir", default="/home/evawang/T-GCN/data")
+    args = parser.parse_args()
+
+    npz_path = args.data_npz
+    model_path = args.model_path
+    out_dir = args.out_dir
 
     d = np.load(npz_path, allow_pickle=True)
     X_test, Y_test, M_test = d["X_test"], d["Y_test"], d["M_test"]
@@ -84,9 +97,9 @@ def main():
     rmse_aligned = float(np.sqrt(np.mean(err_aligned ** 2)))
 
     plt.figure(figsize=(6, 6))
-    plt.plot(Y_test[:, 0], Y_test[:, 1], label="Ground Truth")
+    plt.plot(Y_test[:, 0], Y_test[:, 1], label="COLMAP Ground Truth")
     plt.plot(preds[:, 0], preds[:, 1], label="Prediction (6D+delay)")
-    plt.title("Trajectory: GT vs Pred (6D+delay)")
+    plt.title("Trajectory: COLMAP GT vs Pred (6D+delay)")
     plt.xlabel("x (m)")
     plt.ylabel("y (m)")
     plt.axis("equal")
@@ -98,7 +111,7 @@ def main():
     plt.close()
 
     plt.figure(figsize=(6, 6))
-    plt.plot(Y_test[:, 0], Y_test[:, 1], label="Ground Truth")
+    plt.plot(Y_test[:, 0], Y_test[:, 1], label="COLMAP Ground Truth")
     plt.plot(preds_aligned[:, 0], preds_aligned[:, 1], label="Prediction Aligned")
     plt.title("Trajectory: First-point Aligned (6D+delay)")
     plt.xlabel("x (m)")
@@ -109,6 +122,28 @@ def main():
     plt.tight_layout()
     p1b = f"{out_dir}/plot_traj_gcn6_delay_aligned.png"
     plt.savefig(p1b, dpi=160)
+    plt.close()
+
+    # Focused view around origin: shift both trajectories by GT first point.
+    gt_local = Y_test - Y_test[0]
+    pred_local = preds_aligned - Y_test[0]
+    max_abs = float(np.max(np.abs(np.vstack([gt_local, pred_local]))))
+    radius = max(5.0, min(30.0, max_abs * 1.15))
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(gt_local[:, 0], gt_local[:, 1], label="COLMAP Ground Truth")
+    plt.plot(pred_local[:, 0], pred_local[:, 1], label="Prediction (Aligned)")
+    plt.title("Trajectory Near Origin (0-centered)")
+    plt.xlabel("x (m, centered)")
+    plt.ylabel("y (m, centered)")
+    plt.xlim(-radius, radius)
+    plt.ylim(-radius, radius)
+    plt.axis("equal")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    p1c = f"{out_dir}/plot_traj_gcn6_delay_focus0.png"
+    plt.savefig(p1c, dpi=160)
     plt.close()
 
     plt.figure(figsize=(8, 3))
@@ -150,6 +185,7 @@ def main():
     print("Saved figures:")
     print(p1)
     print(p1b)
+    print(p1c)
     print(p2)
     print(p2b)
     print(p3)
