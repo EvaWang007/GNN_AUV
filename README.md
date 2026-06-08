@@ -140,6 +140,404 @@ The manuscript can be visited at [arXiv](https://arxiv.org/abs/2503.19382) or [s
  Crowd Flow Prediction is critical to urban management, with the goal of capturing the arrival and departure characteristics of crowd movements under different spatial and temporal distributions, which is fundamentally a spatial-temporal prediction task. Existing works typically treat spatial-temporal prediction as the task of learning a function F to transform historical observations to future observations. We further decompose this cross-time transformation into three processes: (1) Encoding (E): learning the in trinsic representation of observations, (2) Cross-Time Mapping (M): transforming past representations into future representations, and (3) Decoding (D): reconstructing future observations from the future representations. From this perspective, spatial-temporal prediction can be viewed as learning F = E · M·D, which includes learning the space transformations {E,D} between the observation space and the hidden representation space, as well as the spatial-temporal mapping M from future states to past states within
  the representation space. This leads to two key questions: Q1: What kind of representation space allows for mapping the past to the future? Q2:How to achieve mapping the past to the future within the representation space? To address Q1, we propose a Spatial-Temporal Backdoor Adjustment strategy, which learns a Spatial-Temporal De-Confounded (STDC) representation space and estimates the de-confounding causal effect of historical data on future data. This causal relationship we captured serves as the foundation for subsequent spatial-temporal mapping. To address Q2, we design a Spatial-Temporal Embedding (STE) that fuses the information of temporal and spatial confounders, capturing the intrinsic spatial-temporal characteristics of the representations. Additionally, we introduce a Cross-Time Attention mechanism, which queries the attention between the future and the past to guide spatial-temporal mapping. Finally, we integrate the process of learning the STDC representation space and the spatial-temporal mapping into an E-M-D skeleton for spatial-temporal prediction. The skeleton is further instantiated with a Transformer model, building a Transformer model with Spatial-Temporal De-Confounding Strategy (STDCformer). Experiments on two real-world datasets demonstrate that STDCformer achieves state-of-the-art predictive performance and exhibits stronger out-of-distribution generalization capabilities.
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+下面是我联网检索后，对 **MPC 路径规划**相关论文做的理论梳理和时间线总结。先给一句总判断：**MPC 在路径规划里最核心的价值，不是“找一条几何最短路”，而是在运动学/动力学约束、控制输入约束、安全距离约束、动态障碍预测约束下，实时滚动求解一段未来最优轨迹。**
+
+**一、MPC 是什么**
+
+MPC，全称 Model Predictive Control，中文通常叫 **模型预测控制**。它的基本思想是：
+
+在当前时刻，根据系统模型预测未来一段时间内的状态变化，然后求解一个有限时域优化问题，得到一串未来控制量；但真正执行时，只执行第一个控制量。下一时刻再重新感知环境、重新预测、重新优化。
+
+这个过程也叫 **滚动时域控制** 或 **receding horizon control**。Mayne 等人在经典综述中把 MPC 概括为：每个采样时刻求解一个有限时域开环最优控制问题，然后只应用最优控制序列的第一个控制量。这个定义基本奠定了 MPC 理论框架。([colab.ws](https://colab.ws/articles/10.1016%2FS0005-1098%2899%2900214-9))
+
+用路径规划语言说就是：
+
+1. 当前机器人/AUV/车辆在位置 `x_t`。
+2. 预测未来 `N` 步的状态：`x_{t+1}, x_{t+2}, ..., x_{t+N}`。
+3. 同时优化未来 `N` 步的控制：`u_t, u_{t+1}, ..., u_{t+N-1}`。
+4. 目标函数让轨迹尽量靠近目标、路径平滑、控制能耗小、远离障碍物。
+5. 约束条件保证速度、加速度、转角、碰撞距离、动力学模型都合法。
+6. 执行 `u_t`，下一步重新来一遍。
+
+所以 MPC 的本质是：**把控制问题变成一个实时反复求解的约束优化问题。**
+
+**二、MPC 的标准数学形式**
+
+离散系统一般写成：
+
+```text
+x_{k+1} = f(x_k, u_k)
+```
+
+其中：
+
+- `x_k` 是状态，比如位置、速度、航向角、角速度。
+- `u_k` 是控制量，比如加速度、转角、推力、舵角、螺旋桨转速。
+- `f` 是系统模型，可以是线性模型，也可以是非线性动力学模型。
+
+MPC 在每个时刻求解：
+
+```text
+min Σ [状态误差代价 + 控制代价 + 控制变化代价 + 避障代价] + 终端代价
+```
+
+更具体地可以写成：
+
+```text
+min Σ_{i=0}^{N-1} [
+  ||x_{k+i} - x_ref||_Q^2
+  + ||u_{k+i}||_R^2
+  + ||Δu_{k+i}||_S^2
+  + obstacle_cost(x_{k+i})
+]
++ ||x_{k+N} - x_goal||_P^2
+```
+
+约束包括：
+
+```text
+x_{k+i+1} = f(x_{k+i}, u_{k+i})
+x_min ≤ x_{k+i} ≤ x_max
+u_min ≤ u_{k+i} ≤ u_max
+distance(x_{k+i}, obstacle) ≥ safe_margin
+x_{k+N} ∈ terminal_set
+```
+
+这些项对应到路径规划里分别是：
+
+- **状态误差代价**：希望靠近参考路径或目标点。
+- **控制代价**：希望少用力、少耗能。
+- **控制变化代价**：希望动作平滑，不突然急转或急刹。
+- **避障代价/约束**：希望远离障碍物。
+- **终端代价/终端集合**：保证预测时域末端不会走到无法继续控制的危险状态。
+
+这也是为什么 MPC 很适合自动驾驶、无人机、AUV 和移动机器人：它可以天然处理多变量、多约束和未来预测。自动驾驶路径跟踪综述也强调，MPC 被广泛用于轨迹跟踪，正是因为它能系统处理状态约束、控制约束以及未来行为预测。([sciencedirect.com](https://www.sciencedirect.com/science/article/pii/S1367578822001377))
+
+**三、从路径规划角度理解 MPC**
+
+传统路径规划方法，例如 A*、Dijkstra、RRT、人工势场，很多时候偏向“几何路径”：找一条从起点到终点不碰障碍物的曲线。
+
+MPC 更偏向“可执行轨迹”：不仅要不碰障碍，还要问这条轨迹能不能被真实系统开出来。
+
+比如 AUV 或无人车不能瞬间横移，也不能无限加速，更不能突然从 0 度航向跳到 90 度航向。MPC 会把这些运动学和动力学限制放进优化问题中，因此它生成的不是抽象路径，而是带有速度、加速度、航向、控制输入的轨迹。
+
+所以可以这样区分：
+
+| 方法 | 主要关心 | 输出 |
+|---|---|---|
+| A* / Dijkstra | 栅格或图上的最短路径 | 几何路径 |
+| RRT / RRT* | 高维空间可行路径搜索 | 采样路径 |
+| 人工势场 | 目标吸引 + 障碍排斥 | 局部运动方向 |
+| MPC | 模型约束下的未来最优控制 | 可执行轨迹 + 控制量 |
+
+在实际系统中，常见结构是：
+
+```text
+全局规划器：A* / RRT* / PRM / 栅格地图
+        ↓
+局部规划器：MPC / NMPC / Tube-MPC
+        ↓
+底层控制器：PID / LQR / 推力分配 / 舵角控制
+```
+
+也有一些新论文会把 MPC 同时作为“局部路径规划 + 跟踪控制”模块，不再严格分开规划和控制。自动地面车辆 MPC 综述指出，近年的 AGV 研究已经把 MPC 从单纯路径跟踪扩展到运动规划、规划控制一体化、危险工况避障、动态交通参与者预测等任务。([link.springer.com](https://link.springer.com/article/10.1007/s43684-021-00005-z))
+
+**四、MPC 的几种重要类型**
+
+**1. 线性 MPC**
+
+如果模型是线性的：
+
+```text
+x_{k+1} = A x_k + B u_k
+```
+
+目标函数是二次型，约束是线性的，那么 MPC 问题通常可以变成 QP，也就是二次规划。
+
+优点是计算快、稳定性理论成熟、容易实时实现。
+
+缺点是对强非线性系统不够准确，比如高速车辆侧偏、无人机大姿态运动、AUV 六自由度耦合运动。
+
+**2. 非线性 MPC，NMPC**
+
+如果模型是非线性的：
+
+```text
+x_{k+1} = f(x_k, u_k)
+```
+
+就是 NMPC。路径规划中只要加入圆形/椭圆障碍物约束、非线性车辆模型、AUV 水动力模型，就很容易变成 NMPC。
+
+优点是模型真实、表达能力强。
+
+缺点是求解慢，可能陷入局部最优，对初值和求解器依赖较强。
+
+例如 Park 等 2009 年的自动车避障论文使用非线性 MPC 生成安全轨迹，再用单独控制器跟踪轨迹；论文明确提到使用简化车辆动力学在预测时域内预测状态，并把局部障碍物信息加入性能指标。([journals.sagepub.com](https://journals.sagepub.com/doi/10.1243/09544070JAUTO1149))
+
+**3. 鲁棒 MPC / Tube-MPC**
+
+现实系统模型不准，传感器有噪声，障碍物预测也有误差。鲁棒 MPC 会考虑不确定性，让轨迹不仅在理想情况下安全，而且在扰动范围内也安全。
+
+Tube-MPC 的直觉是：不只规划一条线，而是规划一条“安全管道”。真实轨迹只要始终被包在管道内，就认为安全。
+
+**4. 随机 MPC / Chance-Constrained MPC**
+
+如果障碍物未来位置不是确定的，而是概率分布，就可以用机会约束：
+
+```text
+P(collision) ≤ ε
+```
+
+也就是允许极小概率的风险，但总体保持安全。这在自动驾驶、动态避障、多船避碰中很常见。
+
+**5. 学习型 MPC**
+
+学习型 MPC 会用历史经验改进模型、代价函数或终端集合。Rosolia 和 Borrelli 的 Learning MPC 论文提出从以往迭代轨迹中构造安全集和终端代价，从而保证递归可行性，并让性能随迭代不下降。([arxiv.org](https://arxiv.org/abs/1702.07064))
+
+这类方法和强化学习、模仿学习、神经网络预测模型结合得越来越多，是近几年重要趋势。
+
+**五、MPC 在路径规划中的关键理论问题**
+
+**1. 可行性**
+
+MPC 每一步都要解优化问题，但如果约束太严格，可能“无解”。例如机器人离障碍物太近，安全距离约束、速度约束、转向约束同时满足不了，就会不可行。
+
+常见处理方式：
+
+- 加松弛变量，把硬约束变成软约束。
+- 设置终端集合，保证预测末端仍在可控安全区域。
+- 使用安全走廊或可达集缩小搜索空间。
+- 用上一步解作为 warm start，提高收敛稳定性。
+
+**2. 递归可行性**
+
+递归可行性指的是：如果当前时刻 MPC 有解，那么执行第一个控制后，下一时刻仍然应该有解。
+
+这对路径规划很重要，因为不能只保证“现在看起来安全”，还要保证下一步不会把系统送进死胡同。Mayne 等人的 MPC 稳定性综述重点讨论的就是约束 MPC 中稳定性、最优性和递归可行性的理论基础。([colab.ws](https://colab.ws/articles/10.1016%2FS0005-1098%2899%2900214-9))
+
+**3. 稳定性**
+
+MPC 不是天然稳定的。为了保证稳定，常见设计包括：
+
+- 终端代价 `V_f(x_N)`
+- 终端约束 `x_N ∈ X_f`
+- 局部稳定控制律
+- Lyapunov 约束
+
+2026 年一篇自动驾驶轨迹跟踪论文就把控制 Lyapunov 函数作为显式约束嵌入 MPC，用来同时保证轨迹跟踪、输入约束和闭环稳定性；该文还提到用稀疏 QP 和 warm-started OSQP 实现 50 ms 采样周期。([journals.sagepub.com](https://journals.sagepub.com/doi/10.1177/09544070261423602))
+
+**4. 实时性**
+
+路径规划的 MPC 必须实时求解。无人车可能 20 Hz 到 100 Hz 控制，无人机更快，AUV 虽然慢一些，但模型更复杂、环境不确定性更强。
+
+实时性取决于：
+
+- 预测时域 `N` 多长。
+- 模型是线性还是非线性。
+- 障碍物约束数量多少。
+- 求解器是否高效。
+- 是否使用 warm start。
+- 是否把非凸问题转成凸近似。
+
+2020 年 UAV 动态避障 NMPC 论文使用 PANOC/OpEn 求解器，采样时间为 50 ms，预测时域为 2 s，并将其定位为一种局部路径规划器。([arxiv.org](https://arxiv.org/abs/2008.00792))
+
+**5. 安全约束建模**
+
+路径规划中，障碍物约束通常写成：
+
+```text
+||p_robot - p_obstacle|| ≥ r_safe
+```
+
+但这个约束是非凸的，多个障碍物时更复杂。常见处理包括：
+
+- 把障碍物距离放进代价函数，而不是硬约束。
+- 对障碍物约束线性化。
+- 构造安全走廊。
+- 使用控制障碍函数 CBF。
+- 使用椭圆约束、速度障碍 VO、碰撞锥等方法。
+- 使用 Tube-MPC 或 chance constraint 处理不确定障碍物。
+
+**六、按时间看 MPC 路径规划应用发展**
+
+| 时间阶段 | 发展特点 | 代表论文/方向 |
+|---|---|---|
+| 2000 年左右 | MPC 理论成熟化，重点是稳定性、递归可行性、终端约束 | Mayne 等 2000 年《Constrained model predictive control: Stability and optimality》系统总结约束 MPC 理论。([colab.ws](https://colab.ws/articles/10.1016%2FS0005-1098%2899%2900214-9)) |
+| 2005-2009 年 | MPC 开始进入自动驾驶转向控制、轨迹跟踪、避障 | Falcone 等 2007 年将 MPC 用于自动车主动前轮转向，在冰雪路面高速跟踪轨迹，并比较 NMPC 与在线线性化 MPC。([researchgate.net](https://www.researchgate.net/publication/3332878_Predictive_Active_Steering_Control_for_Autonomous_Vehicle_Systems)) Park 等 2009 年用 NMPC 生成避障轨迹。([journals.sagepub.com](https://journals.sagepub.com/doi/10.1243/09544070JAUTO1149)) |
+| 2010-2016 年 | 从单车路径跟踪扩展到在线运动规划、复杂约束、移动机器人 | MPC 逐渐从“控制器”变成“局部规划器”，开始处理障碍物、安全区域、车辆动力学约束。 |
+| 2017-2020 年 | 多智能体、无人机、鲁棒避障、学习 MPC 兴起 | Kamel 等 2017 年研究多架微型飞行器的去中心化 NMPC 避碰，考虑状态估计和其他智能体位置速度不确定性。([arxiv.org](https://arxiv.org/abs/1703.01164)) Rosolia 和 Borrelli 2017 年推动 Learning MPC。([arxiv.org](https://arxiv.org/abs/1702.07064)) 2020 年 UAV 动态障碍 NMPC 实现 50 ms 实时局部规划。([arxiv.org](https://arxiv.org/abs/2008.00792)) |
+| 2021-2023 年 | 综述增多，MPC 成为自动驾驶、无人机、AUV/USV 的主流约束规划方法之一 | 自动地面车辆综述指出 MPC 已广泛用于 AGV，并扩展到规划控制一体化。([link.springer.com](https://link.springer.com/article/10.1007/s43684-021-00005-z)) MAV 综述总结了线性/非线性 MPC、预测时域调参、扰动观测、强化学习结合等趋势。([arxiv.org](https://arxiv.org/abs/2011.11104)) AUV 方向出现 IIFDS-NMPC 这类上层规划 + 下层 NMPC 跟踪结构，并在 BlueRov2 上做实物实验。([mdpi.com](https://www.mdpi.com/2077-1312/11/10/2014)) |
+| 2024-2026 年 | 趋势转向安全证明、数据驱动、Koopman、CLF/CBF、实时优化 | 2025 年 Koopman MPC 尝试把非线性路径规划问题提升到 Koopman 空间中转成更快的 QP，并声称比原始 NMPC 快很多。([arxiv.org](https://arxiv.org/abs/2510.02584)) 2026 年 MPC-CLF 把 Lyapunov 稳定约束直接嵌入 MPC，提高稳定性可解释性。([journals.sagepub.com](https://journals.sagepub.com/doi/10.1177/09544070261423602)) |
+
+**七、不同平台上的 MPC 应用特点**
+
+**自动驾驶车辆**
+
+自动驾驶是 MPC 路径规划最成熟的方向之一。原因是车辆有明确动力学约束：转角、转角速度、轮胎侧偏、道路边界、车道线、障碍车预测都可以自然写进 MPC。
+
+自动驾驶中的 MPC 常用于：
+
+- 路径跟踪
+- 车道保持
+- 换道
+- 紧急避障
+- 速度规划
+- 轨迹规划与控制一体化
+
+Falcone 2007 年论文是很经典的早期代表，它把 MPC 用于主动前轮转向，并在低附着冰面高速条件下做了仿真和实验。([researchgate.net](https://www.researchgate.net/publication/3332878_Predictive_Active_Steering_Control_for_Autonomous_Vehicle_Systems))
+
+**移动机器人**
+
+移动机器人中 MPC 主要解决两个问题：非完整约束和局部避障。
+
+差速机器人、Ackermann 车、全向机器人都存在不同运动约束。MPC 可以把这些约束写入预测模型，比单纯人工势场更不容易产生不可执行动作。
+
+但移动机器人环境障碍物多，MPC 容易遇到非凸约束和局部最优问题，所以常与 A*、RRT、人工势场、安全走廊结合。
+
+**无人机 UAV / MAV**
+
+无人机的难点是三维运动、姿态动力学复杂、控制频率高。MPC 的优势是能统一考虑动力学约束和避障约束，缺点是 NMPC 求解压力大。
+
+Kamel 等 2017 年多 MAV 避碰论文很典型：它不要求事先给出无碰撞参考轨迹，而是用模型控制同时做轨迹跟踪和碰撞避免，并考虑其他飞行器位置速度不确定性。([arxiv.org](https://arxiv.org/abs/1703.01164))
+
+**水面/水下机器人 USV/AUV**
+
+USV/AUV 的 MPC 很适合你的研究方向。原因是水下/水面机器人具有明显约束：
+
+- 惯性大，不能急停急转。
+- 水动力模型非线性强。
+- 洋流扰动明显。
+- 传感器信息不完整。
+- 安全距离和避障约束重要。
+- AUV 能量有限，控制代价很关键。
+
+2018 年 USV 论文把有限控制集 MPC 用于无人水面艇避碰，并强调它把路径规划和控制系统结合起来，输出更接近实际执行器的推进器转速和推进角，而不是抽象力/力矩。([mdpi.com](https://www.mdpi.com/2076-3417/8/6/926))
+
+2023 年 AUV 论文采用上层 IIFDS 路径规划、下层 NMPC 轨迹跟踪的混合结构，并在 BlueRov2 平台上做了实物测试，说明 MPC 已经不只是仿真方法，而是在水下机器人实物验证中越来越常见。([mdpi.com](https://www.mdpi.com/2077-1312/11/10/2014))
+
+**八、MPC 与深度强化学习/GNN 的关系**
+
+如果你后续想把 MPC 和你前面提到的 AUV、GNN、MA-SAC 结合，可以这样理解：
+
+MPC 的强项是：
+
+- 安全约束明确
+- 动力学可解释
+- 控制输入可执行
+- 适合做局部实时规划
+- 能处理硬约束
+
+强化学习的强项是：
+
+- 可从交互中学习策略
+- 适合复杂环境经验积累
+- 可以处理难以手工建模的决策
+- 推理时速度快
+
+GNN 的强项是：
+
+- 建模多智能体/障碍物之间的关系
+- 适合可变数量邻居
+- 适合 AUV 群体协同避障
+- 能表达拓扑结构和局部交互
+
+比较好的结合路线是：
+
+```text
+GNN：编码 AUV-障碍物-目标-邻居关系
+        ↓
+RL / MA-SAC：输出高层意图、参考速度、目标点或代价权重
+        ↓
+MPC / NMPC：在动力学和安全约束下生成可执行控制量
+```
+
+也就是说，**不要让强化学习直接控制推进器**，而是让它给 MPC 提供高层决策；MPC 负责最后一层安全可执行控制。这种结构在论文趋势上也很吻合：近年 MPC 正在向学习型、数据驱动、安全约束增强方向发展。
+
+**九、推荐你优先读的论文清单**
+
+1. Mayne, Rawlings, Rao, Scokaert, 2000  
+   **Constrained Model Predictive Control: Stability and Optimality**  
+   用途：理解 MPC 稳定性、递归可行性、终端约束的理论根基。  
+   来源：[CoLab / DOI 信息](https://colab.ws/articles/10.1016%2FS0005-1098%2899%2900214-9) ([colab.ws](https://colab.ws/articles/10.1016%2FS0005-1098%2899%2900214-9))
+
+2. Falcone et al., 2007  
+   **Predictive Active Steering Control for Autonomous Vehicle Systems**  
+   用途：自动驾驶中 MPC 路径跟踪/主动转向的经典早期应用。  
+   来源：[ResearchGate 条目](https://www.researchgate.net/publication/3332878_Predictive_Active_Steering_Control_for_Autonomous_Vehicle_Systems) ([researchgate.net](https://www.researchgate.net/publication/3332878_Predictive_Active_Steering_Control_for_Autonomous_Vehicle_Systems))
+
+3. Park et al., 2009  
+   **Obstacle Avoidance of Autonomous Vehicles Based on Model Predictive Control**  
+   用途：理解 NMPC 如何做在线避障轨迹生成。  
+   来源：[SAGE Journals](https://journals.sagepub.com/doi/10.1243/09544070JAUTO1149) ([journals.sagepub.com](https://journals.sagepub.com/doi/10.1243/09544070JAUTO1149))
+
+4. Rosolia & Borrelli, 2017  
+   **Learning Model Predictive Control for Iterative Tasks**  
+   用途：理解学习型 MPC，尤其是如何从历史轨迹构造安全集和终端代价。  
+   来源：[arXiv:1702.07064](https://arxiv.org/abs/1702.07064) ([arxiv.org](https://arxiv.org/abs/1702.07064))
+
+5. Kamel et al., 2017  
+   **Nonlinear Model Predictive Control for Multi-Micro Aerial Vehicle Robust Collision Avoidance**  
+   用途：理解多智能体/多无人机 NMPC 避碰。  
+   来源：[arXiv:1703.01164](https://arxiv.org/abs/1703.01164) ([arxiv.org](https://arxiv.org/abs/1703.01164))
+
+6. Sun et al., 2018  
+   **Collision Avoidance Using Finite Control Set Model Predictive Control for Unmanned Surface Vehicle**  
+   用途：理解 USV 中 MPC 如何直接输出实际执行器控制量。  
+   来源：[Applied Sciences / MDPI](https://www.mdpi.com/2076-3417/8/6/926) ([mdpi.com](https://www.mdpi.com/2076-3417/8/6/926))
+
+7. Nguyen et al., 2020  
+   **Model Predictive Control for Micro Aerial Vehicles: A Survey**  
+   用途：系统了解无人机 MPC 的线性/非线性、鲁棒性、RL 结合趋势。  
+   来源：[arXiv:2011.11104](https://arxiv.org/abs/2011.11104) ([arxiv.org](https://arxiv.org/abs/2011.11104))
+
+8. Du, Zhou, Arai, 2023  
+   **Hybrid Layer of IIFDS and NMPC for Navigation and Control of AUVs**  
+   用途：与你的 AUV 动态避障方向最相关，适合理解“上层路径规划 + 下层 NMPC 跟踪”。  
+   来源：[JMSE / MDPI](https://www.mdpi.com/2077-1312/11/10/2014) ([mdpi.com](https://www.mdpi.com/2077-1312/11/10/2014))
+
+9. Gao et al., 2026  
+   **A Lyapunov-Constrained MPC Framework for Stable Trajectory Tracking of Autonomous Vehicles**  
+   用途：理解最新趋势中如何把稳定性证明显式放进 MPC 优化约束。  
+   来源：[SAGE Journals](https://journals.sagepub.com/doi/10.1177/09544070261423602) ([journals.sagepub.com](https://journals.sagepub.com/doi/10.1177/09544070261423602))
+
+总结一句：**MPC 路径规划的发展主线，是从“约束控制理论”走向“动态环境中的实时安全轨迹优化”，再走向“与学习、概率预测、图结构、多智能体协同相结合”。** 对 AUV 动态避障来说，MPC 非常适合作为最后一层安全控制器，而 GNN/强化学习更适合作为环境关系建模和高层决策模块。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 The manuscript can be visited at [arXiv](https://arxiv.org/abs/2412.02942) or [sciencedirect](https://www.sciencedirect.com/science/article/abs/pii/S1566253525007171)
 
 [The code](https://github.com/GeoX-Lab/STDCformer).
